@@ -3,12 +3,14 @@ local module = {
 }
 
 local properties = {
-	Part = {"Name", "Orientation", "Size", "CFrame", "Color", "Transparency", "CanCollide", "Anchored", "Material", "Shape"},
+	Part = {"Name", "Size", "Color", "Transparency", "CFrame", "CanCollide", "Anchored", "Material", "Shape"},
 	MeshPart = {"Name", "MeshId", "CFrame", "Size", "Transparency", "BrickColor", "CanCollide", "Anchored", "Material"},
 	Decal = {"Name", "Texture", "Transparency", "Face", "Color3"},
 }
 
--- Parts can be under root, or have one model (no nested parts or models inside nested)
+local overriddenProperties = {"CFrame", "Position", "Color", "Size", "Material", "Shape"}
+-- have to be converted to string for json encoding to work properly.
+
 function module.serialize(object: Instance)
 	local children = object:GetChildren()
 	local result = {}
@@ -16,13 +18,26 @@ function module.serialize(object: Instance)
 	local function getItem(item: Instance)
 		local propertyType = properties[item.ClassName]
 		local itemObject = {itemType = item.ClassName, props = {}, decals = {}}
-		for _, property in pairs(propertyType) do
-			local newProperty = item[property]
-			itemObject.props[property] = newProperty
+		if item:IsA("Model") then
+			itemObject.props["pivot"] = tostring(item:GetPivot())
+		end
+		if propertyType then
+			for _, property in pairs(propertyType) do
+				local newProperty = item[property]
+				itemObject.props[property] = newProperty
+				if table.find(overriddenProperties, property) then
+					itemObject.props[property] = tostring(newProperty)
+				end
+			end
 		end
 		local function getDecalItem(decal)
 			local result = {}
 			for _, prop in pairs(properties.Decal) do
+				if prop == "Face" then
+					result[prop] = tostring(decal[prop])
+					-- doesn't use string on value for unknown reason.
+					continue
+				end
 				result[prop] = decal[prop]
 			end
 			return result
@@ -50,11 +65,11 @@ function module.serialize(object: Instance)
 		insertDecalItems()
 		return itemObject
 	end
-
-
+	
+	
 	local function getModel(model)
 		local parts = model:GetChildren()
-		local itemObject = {itemType = "Model", Name = model.Name, pivot = model:GetPivot(), parts = {}}
+		local itemObject = {itemType = "Model", Name = model.Name, pivot = tostring(model:GetPivot()), parts = {}}
 		for _, part in parts do
 			if not part:IsA("BasePart") then
 				continue
@@ -63,7 +78,7 @@ function module.serialize(object: Instance)
 		end
 		return itemObject
 	end
-
+	
 	for _,item in pairs(children) do
 		if item:IsA("Model") then
 			table.insert(result, getModel(item))
@@ -77,7 +92,7 @@ end
 function module.construct(serialized: {}, containerName)
 	local container = Instance.new("Model")
 	container.Name = containerName or "generated_container"
-
+	
 	-- will find mesh in specified collection
 	local function getMesh(meshId)
 		local meshResult = Instance.new("Part")
@@ -94,19 +109,44 @@ function module.construct(serialized: {}, containerName)
 		end
 		return meshResult
 	end
-
+	
+	local function stringSetToType(propertyString, propertyType)
+		local array = string.split(propertyString, ",")
+		if propertyType == "Position" or propertyType == "Size" then
+			return Vector3.new(array[1], array[2], array[3])
+		elseif propertyType == "CFrame" then
+			return CFrame.new(
+				array[1], array[2], array[3], 
+				array[4], array[5], array[6], 
+				array[7], array[8], array[9], 
+				array[10], array[11], array[12]
+			)
+		elseif propertyType == "Color" then
+			return Color3.new(array[1], array[2], array[3])
+		elseif propertyType == "Material" or propertyType == "Shape" or "Enum" then
+			local enumSplit = string.split(propertyString, ".")
+			local enumType, enumValue = enumSplit[2], enumSplit[3]
+			local enum = Enum[enumType][enumValue]
+			return enum
+		end
+	end
+	
 	local function getInstancedPart(item)
 		local itemType, props = item.itemType, item.props
 		local newInstance = itemType ~= "MeshPart" and Instance.new(itemType)
 			or getMesh(props.MeshId)
 		for k,v in pairs(props) do
-			if k == "MeshId" then
+			if k == "MeshId" or v == "nil" then
+				continue
+			end
+			if table.find(overriddenProperties, k) then
+				newInstance[k] = stringSetToType(v,k)
 				continue
 			end
 			newInstance[k] = v
-			-- key is property name
-			-- (handles the naming)
 		end
+		-- key is property name
+		-- (handles the naming)
 		local function loadDecals()
 			for _, decalItem in pairs(item.decals) do
 				if not decalItem then
@@ -115,6 +155,10 @@ function module.construct(serialized: {}, containerName)
 				local function getDecalInstance(decalItem)
 					local decal = Instance.new("Decal")
 					for k,v in pairs(decalItem) do
+						if k == "Face" then
+							decal[k] = stringSetToType(v, "Enum")
+							continue
+						end
 						decal[k] = v
 					end
 					return decal
@@ -137,16 +181,17 @@ function module.construct(serialized: {}, containerName)
 		smoothSurfaces(newInstance)
 		return newInstance
 	end
-
+	
 	local function getInstancedModel(item)
 		local model = Instance.new("Model")
 		model.Name = item.Name
+		model:PivotTo(stringSetToType(item.pivot, "CFrame"))
 		for _, part in pairs(item.parts) do
 			getInstancedPart(part).Parent = model
 		end
 		return model
 	end
-
+	
 	local partType = {"Part", "MeshPart"}
 	for _, item in pairs(serialized) do
 		local itemType = item.itemType
@@ -158,10 +203,9 @@ function module.construct(serialized: {}, containerName)
 		if itemType == "Model" then
 			local model = getInstancedModel(item)
 			model.Parent = container
-			continue
 		end
 	end
-
+	
 	return container
 end
 
